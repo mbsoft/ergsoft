@@ -1,0 +1,60 @@
+name: ErgSoft
+options:
+  bundleIdPrefix: com.mbsoft
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_TEAM: ""      # set your Apple Team ID here or in Xcode
+    CODE_SIGN_STYLE: Automatic
+targets:
+  ErgSoft:
+    type: application
+    platform: iOS
+    sources: [ErgSoft]
+    dependencies:
+      - target: ErgSoftWatch
+    info:
+      path: ErgSoft/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: ErgSoft
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSBluetoothAlwaysUsageDescription: ErgSoft connects to your rower, bike or ski erg and heart rate strap over Bluetooth.
+        NSHealthShareUsageDescription: ErgSoft reads heart rate to show it during workouts.
+        NSHealthUpdateUsageDescription: ErgSoft saves your completed workouts to Apple Health.
+        UIBackgroundModes: [bluetooth-central]
+    entitlements:
+      path: ErgSoft/Resources/ErgSoft.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+        com.apple.developer.healthkit.access: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mbsoft.ergsoft
+        TARGETED_DEVICE_FAMILY: "1,2"
+  ErgSoftWatch:
+    type: application
+    platform: watchOS
+    sources: [ErgSoftWatch]
+    info:
+      path: ErgSoftWatch/Info.plist
+      properties:
+        CFBundleDisplayName: ErgSoft
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.mbsoft.ergsoft
+        WKRunsIndependentlyOfCompanionApp: false
+        NSHealthShareUsageDescription: ErgSoft streams your heart rate to the iPhone app during workouts.
+        NSHealthUpdateUsageDescription: ErgSoft records your erg workouts.
+        WKBackgroundModes: [workout-processing]
+    entitlements:
+      path: ErgSoftWatch/ErgSoftWatch.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+        com.apple.developer.healthkit.access: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mbsoft.ergsoft.watchkitapp
