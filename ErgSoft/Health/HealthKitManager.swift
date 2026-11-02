@@ -20,6 +20,15 @@ final class HealthKitManager {
         try await store.requestAuthorization(toShare: share, read: read)
     }
 
+    /// Launch the watch app into a workout (HR streaming) from the phone.
+    func launchWatchApp(kind: ErgKind) {
+        guard isAvailable else { return }
+        let config = HKWorkoutConfiguration()
+        config.activityType = kind == .bike ? .cycling : .rowing
+        config.locationType = .indoor
+        store.startWatchApp(with: config) { _, _ in }
+    }
+
     func save(_ s: WorkoutSession) async throws -> UUID? {
         guard isAvailable, let end = s.endedAt else { return nil }
         let activity: HKWorkoutActivityType = s.kind == .bike ? .cycling : .rowing

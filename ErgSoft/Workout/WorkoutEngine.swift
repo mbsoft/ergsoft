@@ -19,9 +19,15 @@ final class WorkoutEngine: ObservableObject {
     @Published private(set) var intervalMeters: Double = 0
     @Published private(set) var plan: WorkoutPlan = .justRow
     @Published private(set) var current = ErgSample()
+    /// Average of the last 10 s of pace samples (s/500m), nil until enough data.
+    @Published private(set) var rollingPace10s: Double?
+    private var paceWindow: [(Date, Double)] = []
 
     private let ble: BLEManager
     private let watch: WatchHRReceiver
+    let healthHR = HealthHRObserver()
+    weak var broadcaster: HRBroadcaster?
+    private var hrTicker: AnyCancellable?
     private var cancellables = Set<AnyCancellable>()
     private var ticker: AnyCancellable?
     private var lastTick = Date()
@@ -36,6 +42,12 @@ final class WorkoutEngine: ObservableObject {
         self.ble = ble
         self.watch = watch
         ble.samples.sink { [weak self] in self?.ingest($0) }.store(in: &cancellables)
+        // Keep HR current even outside a workout so the console broadcast works while warming up.
+        hrTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in
+            guard let self, self.state != .running else { return }
+            self.heartRate = self.bestHeartRate()
+            self.broadcaster?.update(heartRate: self.heartRate)
+        }
     }
 
     var currentInterval: Interval? { plan.intervals.indices.contains(intervalIndex) ? plan.intervals[intervalIndex] : nil }
@@ -65,6 +77,7 @@ final class WorkoutEngine: ObservableObject {
         state = .running
         lastTick = Date()
         ble.startMachine()
+        healthHR.start()
         ticker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.tick() }
     }
@@ -75,6 +88,7 @@ final class WorkoutEngine: ObservableObject {
     func finish(into context: ModelContext, machineName: String, kind: ErgKind) -> WorkoutSession {
         state = .finished
         ticker?.cancel()
+        healthHR.stop()
         ble.stopMachine()
         let s = WorkoutSession(startedAt: Date().addingTimeInterval(-elapsed), machineName: machineName, kind: kind, planName: plan.name)
         s.endedAt = Date()
@@ -103,8 +117,19 @@ final class WorkoutEngine: ObservableObject {
 
     // MARK: Internals
 
+    /// Heart rate priority: watch app > strap > HealthKit (any watch workout) > machine
+    private func bestHeartRate() -> Int? {
+        watch.heartRate ?? ble.strapHeartRate ?? healthHR.heartRate ?? current.heartRate
+    }
+
     private func ingest(_ s: ErgSample) {
         current = s
+        if let p = s.paceSecondsPer500m, p > 0 {
+            let now = Date()
+            paceWindow.append((now, p))
+            paceWindow.removeAll { now.timeIntervalSince($0.0) > 10 }
+            rollingPace10s = paceWindow.map(\.1).reduce(0, +) / Double(paceWindow.count)
+        }
         guard state == .running else { return }
         if let d = s.distanceMeters {
             if baseMeters == nil { baseMeters = d }
@@ -126,8 +151,8 @@ final class WorkoutEngine: ObservableObject {
         elapsed += dt
         intervalElapsed += dt
 
-        // Heart rate priority: watch > strap > machine
-        heartRate = watch.heartRate ?? ble.strapHeartRate ?? current.heartRate
+        heartRate = bestHeartRate()
+        broadcaster?.update(heartRate: heartRate)
 
         // 1 Hz recording
         let sec = Int(elapsed)

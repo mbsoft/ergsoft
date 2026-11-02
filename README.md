@@ -4,6 +4,10 @@ iOS + watchOS app for Rogue Echo (and any FTMS) rowers and bikes. Connects over 
 (FTMS, Fitness Machine Service), shows live metrics, runs interval workouts, records sessions,
 exports to Apple Health, and receives live heart rate from an Apple Watch companion app.
 
+## License
+
+GPL-3.0-or-later — see LICENSE.
+
 ## Build
 
 ```

@@ -1,18 +1,39 @@
 import SwiftUI
 import Charts
 
-private struct ChartPoint: Identifiable { let t: Double; let v: Double; var id: Double { t } }
-
 struct SessionDetailView: View {
     let session: WorkoutSession
+    @EnvironmentObject var settings: UserSettings
+    @State private var expanded: ChartSeries?
 
     private var pts: [SamplePoint] { session.points.sorted { $0.t < $1.t } }
+
+    private var power: ChartSeries {
+        ChartSeries(id: "power", title: "Power", unit: "W", color: .orange, inverted: false,
+                    points: pts.compactMap { $0.watts > 0 ? ChartPoint(t: $0.t, v: Double($0.watts)) : nil },
+                    format: { "\(Int($0.rounded())) W" })
+    }
+    private var pace: ChartSeries {
+        ChartSeries(id: "pace", title: "Pace", unit: "/500m", color: .blue, inverted: true,
+                    points: pts.compactMap { $0.pace > 0 && $0.pace < 600 ? ChartPoint(t: $0.t, v: $0.pace) : nil },
+                    format: { Fmt.pace($0) })
+    }
+    private var hr: ChartSeries {
+        ChartSeries(id: "hr", title: "Heart rate", unit: "bpm", color: .red, inverted: false,
+                    points: pts.compactMap { $0.heartRate > 0 ? ChartPoint(t: $0.t, v: Double($0.heartRate)) : nil },
+                    format: { "\(Int($0.rounded()))" })
+    }
+    private var rate: ChartSeries {
+        ChartSeries(id: "rate", title: "Stroke rate", unit: "s/m", color: .green, inverted: false,
+                    points: pts.compactMap { $0.strokeRate > 0 ? ChartPoint(t: $0.t, v: $0.strokeRate) : nil },
+                    format: { "\(Int($0.rounded()))" })
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 LazyVGrid(columns: [GridItem(), GridItem(), GridItem()]) {
-                    stat("Meters", Fmt.meters(session.totalMeters))
+                    stat(settings.units == .metric ? "Meters" : "Distance", settings.distance(session.totalMeters, compact: false))
                     stat("Time", Fmt.clock(session.durationSeconds))
                     if session.kind == .rower { stat("Avg pace", Fmt.pace(session.averagePaceSecondsPer500m)) }
                     stat("Avg W", String(Int(session.averageWatts)))
@@ -22,9 +43,10 @@ struct SessionDetailView: View {
                     stat("Strokes", String(session.strokes))
                 }
                 if !pts.isEmpty {
-                    chart("Power (W)", color: .orange) { p in Double(p.watts) }
-                    if session.kind == .rower { chart("Pace (s/500m)", color: .blue, invert: true) { p in p.pace > 0 ? p.pace : nil } }
-                    chart("Heart rate", color: .red) { p in p.heartRate > 0 ? Double(p.heartRate) : nil }
+                    ForEach([power, pace, hr, rate].filter { !$0.points.isEmpty }) { s in
+                        miniChart(s)
+                    }
+                    Text("Tap a chart to zoom and scrub").font(.caption2).foregroundStyle(.tertiary)
                 }
                 HStack {
                     Image(systemName: session.healthKitUUID == nil ? "heart.slash" : "heart.fill").foregroundStyle(.red)
@@ -34,6 +56,7 @@ struct SessionDetailView: View {
             .padding()
         }
         .navigationTitle(session.planName)
+        .fullScreenCover(item: $expanded) { s in ChartDetailView(series: s) }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {
@@ -42,15 +65,22 @@ struct SessionDetailView: View {
             .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
     }
 
-    private func chart(_ title: String, color: Color, invert: Bool = false, _ value: @escaping (SamplePoint) -> Double?) -> some View {
+    private func miniChart(_ s: ChartSeries) -> some View {
         VStack(alignment: .leading) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Chart(pts.compactMap { p in value(p).map { ChartPoint(t: p.t, v: $0) } }) { cp in
-                LineMark(x: .value("t", cp.t), y: .value(title, cp.v)).foregroundStyle(color).interpolationMethod(.catmullRom)
+            HStack {
+                Text("\(s.title) (\(s.unit))").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption2).foregroundStyle(.tertiary)
             }
-            .chartYScale(domain: .automatic(reversed: invert))
-            .chartXAxis { AxisMarks { v in AxisValueLabel { if let s = v.as(Double.self) { Text(Fmt.clock(s)) } } } }
+            Chart(s.points) { p in
+                LineMark(x: .value("t", p.t), y: .value(s.title, p.v)).foregroundStyle(s.color).interpolationMethod(.monotone)
+            }
+            .chartYScale(domain: .automatic(includesZero: false, reversed: s.inverted))
+            .chartXAxis { AxisMarks { v in AxisValueLabel { if let t = v.as(Double.self) { Text(Fmt.clock(t)) } } } }
+            .chartYAxis { AxisMarks(position: .trailing) { v in AxisGridLine(); AxisValueLabel { if let d = v.as(Double.self) { Text(s.format(d)) } } } }
             .frame(height: 140)
         }
+        .contentShape(Rectangle())
+        .onTapGesture { expanded = s }
     }
 }

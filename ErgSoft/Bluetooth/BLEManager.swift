@@ -30,6 +30,27 @@ final class BLEManager: NSObject, ObservableObject {
     /// Fires for every decoded machine notification.
     let samples = PassthroughSubject<ErgSample, Never>()
 
+    enum MachineEvent { case started, paused, stopped, reset }
+    /// Console-originated state changes (user pressed a button or the flywheel started/stopped).
+    let machineEvents = PassthroughSubject<MachineEvent, Never>()
+
+    // Diagnostics
+    @Published var feature: FTMS.Feature?
+    @Published var trainingStatus: String = "—"
+    @Published var machineStatus: String = "—"
+    @Published var powerRange: String = "—"
+    @Published var resistanceRange: String = "—"
+    @Published var controlPointLog: [String] = []
+    @Published var eventLog: [String] = []
+    @Published var packetsPerSecond: Double = 0
+    private var packetTimes: [Date] = []
+
+    private func log(_ s: String) {
+        let t = Date().formatted(date: .omitted, time: .standard)
+        eventLog.insert("\(t)  \(s)", at: 0)
+        if eventLog.count > 200 { eventLog.removeLast() }
+    }
+
     private var central: CBCentralManager!
     private var seen: [UUID: CBPeripheral] = [:]
     private var controlPoint: CBCharacteristic?
@@ -79,12 +100,22 @@ final class BLEManager: NSObject, ObservableObject {
         if let p = hrStrap { central.cancelPeripheralConnection(p) }
     }
 
+    private func notePacket() {
+        let now = Date()
+        packetTimes.append(now)
+        packetTimes.removeAll { now.timeIntervalSince($0) > 5 }
+        packetsPerSecond = Double(packetTimes.count) / 5.0
+    }
+
     // MARK: Control point (optional; many machines just stream without it)
 
     private func write(_ op: FTMS.Op, params: [UInt8] = []) {
         guard let cp = controlPoint, let p = erg else { return }
         p.writeValue(Data([op.rawValue] + params), for: cp, type: .withResponse)
+        log("Control point write: \(op)")
     }
+    func setTargetPower(_ w: Int) { guard let cp = controlPoint, let p = erg else { return }; p.writeValue(Data([0x05, UInt8(w & 0xFF), UInt8(w >> 8)]), for: cp, type: .withResponse); log("Set target power \(w) W") }
+    func setTargetHeartRate(_ bpm: Int) { guard let cp = controlPoint, let p = erg else { return }; p.writeValue(Data([0x06, UInt8(bpm)]), for: cp, type: .withResponse); log("Set target HR \(bpm)") }
     func requestControl() { write(.requestControl) }
     func startMachine()   { write(.startOrResume) }
     func stopMachine()    { write(.stopOrPause, params: [0x01]) }
@@ -112,12 +143,13 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 
     nonisolated func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+        Task { @MainActor in log("Connected \(p.name ?? "")") }
         p.discoverServices([FTMS.service, HRS.service])
     }
 
     nonisolated func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         Task { @MainActor in
-            if p == erg { ergConnected = false; erg = nil; controlPoint = nil; ergKind = .unknown }
+            if p == erg { ergConnected = false; erg = nil; controlPoint = nil; ergKind = .unknown; log("Erg disconnected \(error.map { $0.localizedDescription } ?? "")") }
             if p == hrStrap { hrStrapConnected = false; hrStrap = nil; strapHeartRate = nil }
         }
     }
@@ -135,7 +167,8 @@ extension BLEManager: CBPeripheralDelegate {
         for s in p.services ?? [] {
             if s.uuid == FTMS.service {
                 p.discoverCharacteristics([FTMS.rowerData, FTMS.indoorBikeData, FTMS.controlPoint,
-                                           FTMS.machineStatus, FTMS.feature], for: s)
+                                           FTMS.machineStatus, FTMS.feature, FTMS.trainingStatus,
+                                           FTMS.supportedPowerRange, FTMS.supportedResistanceRange], for: s)
             } else if s.uuid == HRS.service {
                 p.discoverCharacteristics([HRS.measurement], for: s)
             }
@@ -156,6 +189,10 @@ extension BLEManager: CBPeripheralDelegate {
                 Task { @MainActor in controlPoint = ch; requestControl() }
             case FTMS.machineStatus:
                 p.setNotifyValue(true, for: ch)
+            case FTMS.trainingStatus:
+                p.setNotifyValue(true, for: ch); p.readValue(for: ch)
+            case FTMS.feature, FTMS.supportedPowerRange, FTMS.supportedResistanceRange:
+                p.readValue(for: ch)
             case HRS.measurement:
                 p.setNotifyValue(true, for: ch)
                 Task { @MainActor in if p == hrStrap { hrStrapConnected = true } }
@@ -168,9 +205,31 @@ extension BLEManager: CBPeripheralDelegate {
         guard let data = ch.value else { return }
         switch ch.uuid {
         case FTMS.rowerData:
-            if let s = ErgSample.fromRowerData(data) { Task { @MainActor in latest = s; samples.send(s) } }
+            if let s = ErgSample.fromRowerData(data) { Task { @MainActor in notePacket(); latest = s; samples.send(s) } }
         case FTMS.indoorBikeData:
-            if let s = ErgSample.fromIndoorBikeData(data) { Task { @MainActor in latest = s; samples.send(s) } }
+            if let s = ErgSample.fromIndoorBikeData(data) { Task { @MainActor in notePacket(); latest = s; samples.send(s) } }
+        case FTMS.feature:
+            Task { @MainActor in feature = FTMS.Feature(data); log("Feature: " + data.map { String(format: "%02X", $0) }.joined()) }
+        case FTMS.trainingStatus:
+            let t = FTMS.trainingStatusText(data); Task { @MainActor in trainingStatus = t; log("Training status: \(t)") }
+        case FTMS.machineStatus:
+            let t = FTMS.machineStatusText(data)
+            let ev: MachineEvent? = {
+                switch data.first {
+                case 0x01: return .reset
+                case 0x02: return data.count > 1 && data[1] == 0x02 ? .paused : .stopped
+                case 0x04: return .started
+                default: return nil
+                }
+            }()
+            Task { @MainActor in machineStatus = t; log("Machine status: \(t)"); if let ev { machineEvents.send(ev) } }
+        case FTMS.controlPoint:
+            let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
+            Task { @MainActor in controlPointLog.insert(hex, at: 0); log("Control point response: \(hex)") }
+        case FTMS.supportedPowerRange:
+            var r = ByteReader(data); if let a = r.s16(), let b = r.s16(), let st = r.u16() { Task { @MainActor in powerRange = "\(a)–\(b) W, step \(st)" } }
+        case FTMS.supportedResistanceRange:
+            var r = ByteReader(data); if let a = r.s16(), let b = r.s16(), let st = r.u16() { Task { @MainActor in resistanceRange = "\(Double(a)/10)–\(Double(b)/10), step \(Double(st)/10)" } }
         case HRS.measurement:
             if let hr = ErgSample.heartRate(from: data) {
                 Task { @MainActor in if p == hrStrap { strapHeartRate = hr } }

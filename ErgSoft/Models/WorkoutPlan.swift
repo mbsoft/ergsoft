@@ -28,8 +28,17 @@ struct WorkoutPlan: Identifiable, Codable, Hashable {
 
     static let justRow = WorkoutPlan(name: "Just Row", intervals: [])
 
+    /// n consecutive work splits of `minutes` each, no rest (e.g. 6×5 = 30 min with split markers).
+    static func splits(_ n: Int, minutes: Int) -> WorkoutPlan {
+        WorkoutPlan(name: "\(n * minutes) min · \(n)×\(minutes)",
+                    intervals: (0..<n).map { _ in Interval(kind: .work, goal: .time(seconds: minutes * 60)) })
+    }
+
     static let presets: [WorkoutPlan] = [
         justRow,
+        splits(6, minutes: 5),    // 30 min
+        splits(9, minutes: 5),    // 45 min
+        splits(6, minutes: 10),   // 60 min
         WorkoutPlan(name: "2000m", intervals: [Interval(kind: .work, goal: .distance(meters: 2000))]),
         WorkoutPlan(name: "20:00 steady", intervals: [Interval(kind: .work, goal: .time(seconds: 1200))]),
         WorkoutPlan(name: "4 × 500m / 2:00 rest", intervals: (0..<4).flatMap { i in

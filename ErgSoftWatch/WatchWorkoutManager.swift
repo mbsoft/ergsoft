@@ -32,6 +32,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     func start() {
         guard !isRunning else { return }
+        if store.authorizationStatus(for: HKObjectType.workoutType()) != .sharingAuthorized {
+            Task { await requestAuthorization(); if store.authorizationStatus(for: HKObjectType.workoutType()) == .sharingAuthorized { start() } }
+            return
+        }
         let config = HKWorkoutConfiguration()
         config.activityType = activity
         config.locationType = .indoor
@@ -65,9 +69,31 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         heartRate = nil
     }
 
+    @Published private(set) var phoneReachable = false
+    @Published private(set) var lastSendError: String?
+
+    private var consecutiveFailures = 0
+
     private func send(hr: Int) {
-        guard WCSession.default.activationState == .activated, WCSession.default.isReachable else { return }
-        WCSession.default.sendMessage(["hr": hr, "ts": Date().timeIntervalSince1970], replyHandler: nil, errorHandler: nil)
+        let s = WCSession.default
+        guard s.activationState == .activated else { return }
+        phoneReachable = s.isReachable
+        let payload: [String: Any] = ["hr": hr, "ts": Date().timeIntervalSince1970]
+        // Channel 1: application context — latest-value, queued, never errors on reachability.
+        // The phone gets it whenever it next runs, so HR survives the phone app being backgrounded.
+        try? s.updateApplicationContext(payload)
+        // Channel 2: live message when the phone app is in the foreground (lowest latency).
+        guard s.isReachable else { return }
+        s.sendMessage(payload, replyHandler: { [weak self] _ in
+            Task { @MainActor in self?.consecutiveFailures = 0; self?.lastSendError = nil }
+        }, errorHandler: { [weak self] e in
+            Task { @MainActor in
+                guard let self else { return }
+                self.consecutiveFailures += 1
+                // Only surface a persistent problem, not a single dropped packet.
+                self.lastSendError = self.consecutiveFailures >= 5 ? "iPhone not reachable — open ErgSoft on the phone" : nil
+            }
+        })
     }
 }
 
@@ -93,7 +119,12 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
 }
 
 extension WatchWorkoutManager: WCSessionDelegate {
-    nonisolated func session(_ s: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {}
+    nonisolated func session(_ s: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {
+        Task { @MainActor in phoneReachable = s.isReachable }
+    }
+    nonisolated func sessionReachabilityDidChange(_ s: WCSession) {
+        Task { @MainActor in phoneReachable = s.isReachable }
+    }
     nonisolated func session(_ s: WCSession, didReceiveMessage message: [String: Any]) { handle(message) }
     nonisolated func session(_ s: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) { handle(userInfo) }
     private nonisolated func handle(_ m: [String: Any]) {
